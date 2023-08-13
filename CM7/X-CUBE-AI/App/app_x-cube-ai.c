@@ -56,182 +56,130 @@
 #include "ai_datatypes_defines.h"
 #include "network.h"
 #include "network_data.h"
+#include "img_array.h"
 
-/* USER CODE BEGIN includes */
-/* USER CODE END includes */
 
-/* IO buffers ----------------------------------------------------------------*/
-
-#if !defined(AI_NETWORK_INPUTS_IN_ACTIVATIONS)
-AI_ALIGNED(4) ai_i8 data_in_1[AI_NETWORK_IN_1_SIZE_BYTES];
-ai_i8* data_ins[AI_NETWORK_IN_NUM] = {
-data_in_1
-};
-#else
-ai_i8* data_ins[AI_NETWORK_IN_NUM] = {
-NULL
-};
-#endif
-
-#if !defined(AI_NETWORK_OUTPUTS_IN_ACTIVATIONS)
-AI_ALIGNED(4) ai_i8 data_out_1[AI_NETWORK_OUT_1_SIZE_BYTES];
-ai_i8* data_outs[AI_NETWORK_OUT_NUM] = {
-data_out_1
-};
-#else
-ai_i8* data_outs[AI_NETWORK_OUT_NUM] = {
-NULL
-};
-#endif
-
-/* Activations buffers -------------------------------------------------------*/
-
-AI_ALIGNED(32)
-static uint8_t pool0[AI_NETWORK_DATA_ACTIVATION_1_SIZE];
-
-ai_handle data_activations0[] = {pool0};
-
-/* AI objects ----------------------------------------------------------------*/
-
+/* Global handle to reference the instantiated C-model */
 static ai_handle network = AI_HANDLE_NULL;
 
-static ai_buffer* ai_input;
-static ai_buffer* ai_output;
+/* Global c-array to handle the activations buffer */
+AI_ALIGNED(32)
+static ai_u8 activations[AI_NETWORK_DATA_ACTIVATIONS_SIZE];
 
-static void ai_log_err(const ai_error err, const char *fct)
-{
-  /* USER CODE BEGIN log */
-  if (fct)
-    printf("TEMPLATE - Error (%s) - type=0x%02x code=0x%02x\r\n", fct,
-        err.type, err.code);
-  else
-    printf("TEMPLATE - Error - type=0x%02x code=0x%02x\r\n", err.type, err.code);
+/* Array to store the data of the input tensor */
+AI_ALIGNED(32)
+static ai_float* in_data;
+//static ai_float in_data[AI_NETWORK_IN_1_SIZE];
+//static ai_u8 in_data[AI_NETWORK_IN_1_SIZE_BYTES]; 
 
-  do {} while (1);
-  /* USER CODE END log */
-}
+/* c-array to store the data of the output tensor */
+AI_ALIGNED(32)
+static ai_float out_data[AI_NETWORK_OUT_1_SIZE];
+/* static ai_u8 out_data[AI_NETWORK_OUT_1_SIZE_BYTES]; */
 
-static int ai_boostrap(ai_handle *act_addr)
+/* Array of pointer to manage the model's input/output tensors */
+static ai_buffer *ai_input;
+static ai_buffer *ai_output;
+static float g_ai_output[AI_NETWORK_OUT_1_SIZE];
+
+/* 
+ * Bootstrap
+ */
+void MX_X_CUBE_AI_Init(void) 
 {
   ai_error err;
+  
+  /* Create and initialize the c-model */
+  const ai_handle acts[] = { activations };
+  err = ai_network_create_and_init(&network, acts, NULL);
+  if (err.type != AI_ERROR_NONE) {  };
 
-  /* Create and initialize an instance of the model */
-  err = ai_network_create_and_init(&network, act_addr, NULL);
-  if (err.type != AI_ERROR_NONE) {
-    ai_log_err(err, "ai_network_create_and_init");
-    return -1;
-  }
-
+  /* Reteive pointers to the model's input/output tensors */
   ai_input = ai_network_inputs_get(network, NULL);
   ai_output = ai_network_outputs_get(network, NULL);
+}
 
-#if defined(AI_NETWORK_INPUTS_IN_ACTIVATIONS)
-  /*  In the case where "--allocate-inputs" option is used, memory buffer can be
-   *  used from the activations buffer. This is not mandatory.
-   */
-  for (int idx=0; idx < AI_NETWORK_IN_NUM; idx++) {
-	data_ins[idx] = ai_input[idx].data;
-  }
-#else
-  for (int idx=0; idx < AI_NETWORK_IN_NUM; idx++) {
-	  ai_input[idx].data = data_ins[idx];
-  }
-#endif
+/* 
+ * Run inference
+ */
+int aiRun(const void *in_data, void *out_data) {
+  ai_i32 n_batch;
+  ai_error err;
+  
+  /* 1 - Update IO handlers with the data payload */
+  ai_input[0].data = AI_HANDLE_PTR(in_data);
+  ai_output[0].data = AI_HANDLE_PTR(out_data);
 
-#if defined(AI_NETWORK_OUTPUTS_IN_ACTIVATIONS)
-  /*  In the case where "--allocate-outputs" option is used, memory buffer can be
-   *  used from the activations buffer. This is no mandatory.
-   */
-  for (int idx=0; idx < AI_NETWORK_OUT_NUM; idx++) {
-	data_outs[idx] = ai_output[idx].data;
-  }
-#else
-  for (int idx=0; idx < AI_NETWORK_OUT_NUM; idx++) {
-	ai_output[idx].data = data_outs[idx];
-  }
-#endif
-
+  /* 2 - Perform the inference */
+  n_batch = ai_network_run(network, &ai_input[0], &ai_output[0]);
+  if (n_batch != 1) {
+      err = ai_network_get_error(network);
+      //...
+  };
+  
   return 0;
 }
 
-static int ai_run(void)
+uint8_t post_process(float *out_data)
 {
-  ai_i32 batch;
+    uint8_t prediction, i = 0;
+    float max_val = -1;
 
-  batch = ai_network_run(network, ai_input, ai_output);
-  if (batch != 1) {
-    ai_log_err(ai_network_get_error(network),
-        "ai_network_run");
-    return -1;
-  }
+    /* find max */
+    for(i = 0; i < AI_NETWORK_OUT_1_SIZE; i++) 
+    {
+        if (max_val < out_data[i]) 
+        {
+            max_val = out_data[i];
+            prediction = i;
+        }
+    }
 
-  return 0;
+    return prediction;
 }
 
-/* USER CODE BEGIN 2 */
-int acquire_and_process_data(ai_i8* data[])
-{
-  /* fill the inputs of the c-model
-  for (int idx=0; idx < AI_NETWORK_IN_NUM; idx++ )
-  {
-      data[idx] = ....
-  }
+/* 
+ * Example of main loop function
+ */
+int a, c=0, passed=1; 
+float* img_array;
 
-  */
-  return 0;
+void acquire_and_process_data(ai_float* a)
+{
+	in_data = a;
 }
 
-int post_process(ai_i8* data[])
+void MX_X_CUBE_AI_Process() 
 {
-  /* process the predictions
-  for (int idx=0; idx < AI_NETWORK_OUT_NUM; idx++ )
-  {
-      data[idx] = ....
-  }
+  int prediction;
+  
+  /* 1 - Acquire, pre-process and fill the input buffers */
+  if (c == 0)
+	  img_array = img_array0;
+  else if (c == 1)
+	  img_array = img_array1;
+  else if (c == 2)
+	  img_array = img_array2;
+  
+  acquire_and_process_data(img_array);
 
-  */
-  return 0;
+  /* 2 - Call inference engine */
+  aiRun(in_data, out_data);
+
+  /* 3 - Post-process the predictions */
+  prediction = post_process(out_data);
+  
+  if (c != prediction && c < 3) 
+	passed = 0;
+  
+  if (c == 2)
+	a=1;
+  
+  c++;
+  
 }
-/* USER CODE END 2 */
 
-/* Entry points --------------------------------------------------------------*/
 
-void MX_X_CUBE_AI_Init(void)
-{
-    /* USER CODE BEGIN 5 */
-  printf("\r\nTEMPLATE - initialization\r\n");
-
-  ai_boostrap(data_activations0);
-    /* USER CODE END 5 */
-}
-
-void MX_X_CUBE_AI_Process(void)
-{
-    /* USER CODE BEGIN 6 */
-  int res = -1;
-
-  printf("TEMPLATE - run - main loop\r\n");
-
-  if (network) {
-
-    do {
-      /* 1 - acquire and pre-process input data */
-      res = acquire_and_process_data(data_ins);
-      /* 2 - process the data - call inference engine */
-      if (res == 0)
-        res = ai_run();
-      /* 3- post-process the predictions */
-      if (res == 0)
-        res = post_process(data_outs);
-    } while (res==0);
-  }
-
-  if (res) {
-    ai_error err = {AI_ERROR_INVALID_STATE, AI_ERROR_CODE_NETWORK};
-    ai_log_err(err, "Process has FAILED");
-  }
-    /* USER CODE END 6 */
-}
 #ifdef __cplusplus
 }
 #endif
